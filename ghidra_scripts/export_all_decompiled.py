@@ -5,7 +5,7 @@ from ghidra.util.task import ConsoleTaskMonitor
 from java.io import FileWriter, File
 import os
 
-# 出力先
+# 出力先ディレクトリ
 out_base = "recovered/ghidra_out"
 if not os.path.exists(out_base):
     os.makedirs(out_base)

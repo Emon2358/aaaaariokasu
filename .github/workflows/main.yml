@@ -41,6 +41,11 @@ jobs:
           distribution: temurin
           java-version: '11'
 
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
       - name: Install utilities
         run: |
           sudo apt-get update
@@ -51,10 +56,14 @@ jobs:
           mkdir -p input ghidra_tmp ghidra_output ghidra_projects scripts
           ls -la
 
-      - name: Ensure Ghidra script exists
+      - name: Ensure helper scripts exist
         run: |
           if [ ! -f scripts/ghidra_decompile_functions.py ]; then
             echo "scripts/ghidra_decompile_functions.py not found - please add it to the repo."
+            exit 1
+          fi
+          if [ ! -f scripts/parse_release_url.py ]; then
+            echo "scripts/parse_release_url.py not found - please add it to the repo."
             exit 1
           fi
 
@@ -62,27 +71,8 @@ jobs:
         id: parse_release
         run: |
           URL="${{ github.event.inputs.release_url }}"
-          # Run python and pass URL as argv[1]
-          python3 - "$URL" > /tmp/parsed.txt <<'PY'
-import sys, re, urllib.parse
-url = sys.argv[1]
-p = urllib.parse.urlparse(url)
-path = p.path
-# expected: /owner/repo/releases/tag/TAG  (also support /releases/latest)
-m = re.match(r'^/([^/]+)/([^/]+)/releases/(?:tag|download)/(.+)$', path)
-if m:
-    owner, repo, tag = m.group(1), m.group(2), m.group(3)
-else:
-    m2 = re.match(r'^/([^/]+)/([^/]+)/releases/?(latest)?$', path)
-    if m2:
-        owner, repo, tag = m2.group(1), m2.group(2), 'latest'
-    else:
-        print("ERROR: couldn't parse release URL", url, file=sys.stderr)
-        sys.exit(2)
-# print owner/repo and tag on separate lines
-print(owner + "/" + repo)
-print(tag)
-PY
+          echo "Using release_url: $URL"
+          python3 scripts/parse_release_url.py "$URL" > /tmp/parsed.txt
           cat /tmp/parsed.txt
           OWNER_REPO=$(sed -n '1p' /tmp/parsed.txt)
           TAG=$(sed -n '2p' /tmp/parsed.txt)
@@ -96,15 +86,14 @@ PY
         run: |
           OWNER_REPO="${{ steps.parse_release.outputs.owner_repo }}"
           TAG="${{ steps.parse_release.outputs.tag }}"
-          API=""
+          if [ -z "$OWNER_REPO" ] || [ -z "$TAG" ]; then
+            echo "owner_repo or tag empty. owner_repo=$OWNER_REPO tag=$TAG"
+            exit 1
+          fi
           if [ "$TAG" = "latest" ]; then
             API="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
           else
-            TAG_ENC=$(python3 - <<'PY'
-import sys, urllib.parse
-print(urllib.parse.quote(sys.argv[1], safe=''))
-PY
- "${TAG}")
+            TAG_ENC=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$TAG")
             API="https://api.github.com/repos/${OWNER_REPO}/releases/tags/${TAG_ENC}"
           fi
           echo "Querying $API"
@@ -258,5 +247,3 @@ PY
             ghidra_projects/**
             decompiled_results/**
             scripts/ghidra_decompile_functions.py
-
-

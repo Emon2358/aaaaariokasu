@@ -21,9 +21,13 @@ jobs:
       - name: Download Ghidra
         run: |
           GHIDRA_VERSION="10.2.4"
-          GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_2023sep.zip"
-          GHIDRA_URL="https://ghidra-sre.org/${GHIDRA_ZIP}"
+          GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_2023feb.zip"
+          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/Ghidra_${GHIDRA_VERSION}_PUBLIC_2023feb.zip"
+          
+          echo "Downloading Ghidra from $GHIDRA_URL ..."
           curl -L -o "${GHIDRA_ZIP}" "$GHIDRA_URL"
+          
+          echo "Unzipping..."
           unzip -q "${GHIDRA_ZIP}"
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
           echo "Ghidra directory: $GHIDRA_DIR"

@@ -1,4 +1,4 @@
-name: Decompile PmmaSoftware.exe using Ghidra (x86 Native)
+name: Decompile Native PmmaSoftware.exe using Ghidra
 
 on:
   workflow_dispatch:
@@ -6,9 +6,12 @@ on:
 jobs:
   decompile:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download PmmaSoftware.exe
         run: |
@@ -24,19 +27,23 @@ jobs:
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
           echo "Ghidra directory: $GHIDRA_DIR"
 
-      - name: Decompile with Ghidra (x86)
+      - name: Decompile with Ghidra (x86 native)
         run: |
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
           GHIDRA_HEADLESS="$GHIDRA_DIR/support/analyzeHeadless"
-          mkdir -p recovered/ghidra_out
+          if [ ! -f "$GHIDRA_HEADLESS" ]; then
+            echo "ERROR: analyzeHeadless not found at $GHIDRA_HEADLESS"
+            exit 1
+          fi
 
-          # プロジェクトを作成して x86 ネイティブとして解析
+          mkdir -p recovered/ghidra_out
           PROJECT_NAME="ghidra_project_temp"
           mkdir -p "$PROJECT_NAME"
-          
+
           "$GHIDRA_HEADLESS" "$PROJECT_NAME" \
             -import PmmaSoftware.exe \
             -processor x86:LE:32:default \
+            -analysisTimeoutPerFile 600 \
             -scriptPath ghidra_scripts \
             -postScript export_all_decompiled.py \
             -deleteProject
@@ -54,4 +61,5 @@ jobs:
             git push -u origin "$BRANCH"
           else
             echo "No recovered files to commit; skipping."
+
 

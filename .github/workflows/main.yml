@@ -1,4 +1,4 @@
-name: Decompile PmmaSoftware.exe using Ghidra
+name: Decompile PmmaSoftware.exe using Ghidra (x86 Native)
 
 on:
   workflow_dispatch:
@@ -9,52 +9,37 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - name: Download PmmaSoftware.exe
         run: |
           curl -L -o PmmaSoftware.exe https://github.com/Emon2358/aaaaariokasu/releases/download/aaaaropkasui/PmmaSoftware.exe
-          ls -lh PmmaSoftware.exe
+          file PmmaSoftware.exe
 
       - name: Download Ghidra 11.4.2
         run: |
-          GHIDRA_VERSION="11.4.2"
-          GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_20250826.zip"
-          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_20250826.zip"
-          
-          echo "Downloading Ghidra from $GHIDRA_URL ..."
-          curl -L -o "${GHIDRA_ZIP}" "$GHIDRA_URL"
-          
-          echo "Unzipping..."
-          unzip -q "${GHIDRA_ZIP}"
+          GHIDRA_ZIP="ghidra_11.4.2_PUBLIC_20250826.zip"
+          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.4.2_build/${GHIDRA_ZIP}"
+          curl -L -o "$GHIDRA_ZIP" "$GHIDRA_URL"
+          unzip -q "$GHIDRA_ZIP"
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
           echo "Ghidra directory: $GHIDRA_DIR"
 
-      - name: Decompile with Ghidra
+      - name: Decompile with Ghidra (x86)
         run: |
-          mkdir -p recovered/ghidra_out
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
-          echo "Using Ghidra directory: $GHIDRA_DIR"
-          
           GHIDRA_HEADLESS="$GHIDRA_DIR/support/analyzeHeadless"
-          if [ ! -f "$GHIDRA_HEADLESS" ]; then
-            echo "ERROR: analyzeHeadless not found at $GHIDRA_HEADLESS"
-            exit 1
-          fi
-          
-          # 一時プロジェクトを作成してネイティブ exe を解析
+          mkdir -p recovered/ghidra_out
+
+          # プロジェクトを作成して x86 ネイティブとして解析
           PROJECT_NAME="ghidra_project_temp"
           mkdir -p "$PROJECT_NAME"
           
           "$GHIDRA_HEADLESS" "$PROJECT_NAME" \
             -import PmmaSoftware.exe \
+            -processor x86:LE:32:default \
             -scriptPath ghidra_scripts \
             -postScript export_all_decompiled.py \
             -deleteProject
-          
-          echo "Ghidra headless decompilation completed. Output is under recovered/ghidra_out/"
 
       - name: Commit recovered decompiled code
         run: |
@@ -63,12 +48,10 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
-          
           if [ -d recovered/ghidra_out ] && [ -n "$(ls -A recovered/ghidra_out 2>/dev/null || true)" ]; then
             git add -A recovered/ghidra_out
-            git commit -m "Recovered native decompiled output (Ghidra) from PmmaSoftware.exe"
+            git commit -m "Recovered native decompiled output (Ghidra x86) from PmmaSoftware.exe"
             git push -u origin "$BRANCH"
-            echo "Pushed recovered ghidra output to branch: $BRANCH"
           else
             echo "No recovered files to commit; skipping."
 

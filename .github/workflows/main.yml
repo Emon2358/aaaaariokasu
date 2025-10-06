@@ -44,9 +44,14 @@ jobs:
             exit 1
           fi
           
-          "$GHIDRA_HEADLESS" ghidra_project \
+          # 一時プロジェクトを作成してネイティブ exe を解析
+          PROJECT_NAME="ghidra_project_temp"
+          mkdir -p "$PROJECT_NAME"
+          
+          "$GHIDRA_HEADLESS" "$PROJECT_NAME" \
             -import PmmaSoftware.exe \
-            -postScript ghidra_scripts/export_all_decompiled.py \
+            -scriptPath ghidra_scripts \
+            -postScript export_all_decompiled.py \
             -deleteProject
           
           echo "Ghidra headless decompilation completed. Output is under recovered/ghidra_out/"
@@ -66,3 +71,4 @@ jobs:
             echo "Pushed recovered ghidra output to branch: $BRANCH"
           else
             echo "No recovered files to commit; skipping."
+

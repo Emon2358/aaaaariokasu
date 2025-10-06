@@ -35,10 +35,20 @@ jobs:
       - name: Decompile with Ghidra
         run: |
           mkdir -p recovered/ghidra_out
-          "${GHIDRA_DIR}/support/analyzeHeadless" ghidra_project \
+          GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
+          echo "Using Ghidra directory: $GHIDRA_DIR"
+          
+          GHIDRA_HEADLESS="$GHIDRA_DIR/support/analyzeHeadless"
+          if [ ! -f "$GHIDRA_HEADLESS" ]; then
+            echo "ERROR: analyzeHeadless not found at $GHIDRA_HEADLESS"
+            exit 1
+          fi
+          
+          "$GHIDRA_HEADLESS" ghidra_project \
             -import PmmaSoftware.exe \
             -postScript ghidra_scripts/export_all_decompiled.py \
             -deleteProject
+          
           echo "Ghidra headless decompilation completed. Output is under recovered/ghidra_out/"
 
       - name: Commit recovered decompiled code

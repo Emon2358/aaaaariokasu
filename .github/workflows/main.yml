@@ -1,15 +1,16 @@
-name: Decompile from Release -> Commit decompiled txt
+name: Decompile from Release URL -> Commit decompiled txt
 
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: 'Release tag to read from (use "latest" for latest release).'
+      release_url:
+        description: 'Full release URL (example: https://github.com/Emon2358/aaaaariokasu/releases/tag/aaaaropkasui).'
         required: false
-        default: 'latest'
+        default: 'https://github.com/Emon2358/aaaaariokasu/releases/tag/aaaaropkasui'
       asset_name:
-        description: 'Asset filename in the release (example: PmmaSoftware.exe)'
+        description: 'Asset filename in the release (example: PmmaSoftware.exe).'
         required: true
+        default: 'PmmaSoftware.exe'
       commit_branch:
         description: 'Branch to commit decompiled files to (must be writable).'
         required: false
@@ -52,28 +53,67 @@ jobs:
 
       - name: Ensure Ghidra script exists
         run: |
-          # The custom Ghidra script should be committed to scripts/ghidra_decompile_functions.py
           if [ ! -f scripts/ghidra_decompile_functions.py ]; then
             echo "scripts/ghidra_decompile_functions.py not found - please add it to the repo."
             exit 1
           fi
+
+      - name: Parse release_url into owner/repo and tag
+        id: parse_release
+        run: |
+          URL="${{ github.event.inputs.release_url }}"
+          python3 - <<'PY' > /tmp/parsed.txt
+import sys, re, urllib.parse
+url = sys.argv[1]
+p = urllib.parse.urlparse(url)
+path = p.path
+# path expected: /owner/repo/releases/tag/TAG
+m = re.match(r'^/([^/]+)/([^/]+)/releases/(?:tag|download)/(.+)$', path)
+if m:
+    owner, repo, tag = m.group(1), m.group(2), m.group(3)
+else:
+    # maybe URL ends with /releases/latest
+    m2 = re.match(r'^/([^/]+)/([^/]+)/releases/?(latest)?$', path)
+    if m2:
+        owner, repo, tag = m2.group(1), m2.group(2), 'latest'
+    else:
+        print("ERROR: couldn't parse release URL", url)
+        sys.exit(2)
+print(owner + "/" + repo + "\n" + tag)
+PY
+ "${URL}"
+          cat /tmp/parsed.txt
+          OWNER_REPO=$(sed -n '1p' /tmp/parsed.txt)
+          TAG=$(sed -n '2p' /tmp/parsed.txt)
+          echo "owner_repo=$OWNER_REPO" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Get release JSON from GitHub API
         id: get_release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.release_tag }}"
-          OWNER_REPO="${{ github.repository }}"
-          if [ "$TAG" = "latest" ] || [ -z "$TAG" ]; then
+          OWNER_REPO="${{ steps.parse_release.outputs.owner_repo }}"
+          TAG="${{ steps.parse_release.outputs.tag }}"
+          API=""
+          if [ "$TAG" = "latest" ]; then
             API="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
           else
-            API="https://api.github.com/repos/${OWNER_REPO}/releases/tags/${TAG}"
+            # tag may contain url-encoded parts; encode
+            TAG_ENC=$(python3 - <<'PY'
+import sys, urllib.parse
+print(urllib.parse.quote(sys.argv[1], safe=''))
+PY
+ "${TAG}")
+            API="https://api.github.com/repos/${OWNER_REPO}/releases/tags/${TAG_ENC}"
           fi
           echo "Querying $API"
           resp=$(curl -sSL -H "Authorization: token ${GITHUB_TOKEN}" "$API")
+          if [ -z "$resp" ]; then
+            echo "Empty response from GitHub API"
+            exit 1
+          fi
           echo "$resp" > /tmp/release.json
-          # extract assets list and asset id for given name
           ASSET_NAME="${{ github.event.inputs.asset_name }}"
           ASSET_ID=$(jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .id' /tmp/release.json)
           ASSET_URL=$(jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' /tmp/release.json)
@@ -84,6 +124,7 @@ jobs:
           fi
           echo "asset_id=$ASSET_ID" >> $GITHUB_OUTPUT
           echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
+          echo "release_json_path=/tmp/release.json" >> $GITHUB_OUTPUT
 
       - name: Download asset (release asset)
         id: download_asset
@@ -91,14 +132,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ASSET_ID="${{ steps.get_release.outputs.asset_id }}"
-          OWNER_REPO="${{ github.repository }}"
+          OWNER_REPO="${{ steps.parse_release.outputs.owner_repo }}"
           OUT=input/target_binary
           echo "Downloading asset id $ASSET_ID..."
-          # Use the asset API to download (binary)
           curl -L \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/Emon2358/releases/assets/${ASSET_ID}" \
+            "https://api.github.com/repos/${OWNER_REPO}/releases/assets/${ASSET_ID}" \
             -o "$OUT"
           echo "Saved to $OUT"
           file "$OUT" || true
@@ -143,7 +183,6 @@ PY
           else
             tar xf ghidra_archive -C ghidra_tmp
           fi
-          # find extracted directory
           GHIDRA_DIR=$(find ghidra_tmp -maxdepth 3 -type d -name "ghidra_*" -print -quit || true)
           if [ -z "$GHIDRA_DIR" ]; then
             GHIDRA_DIR=$(find ghidra_tmp -type f -name "analyzeHeadless" -printf '%h\n' -quit || true)
@@ -199,20 +238,17 @@ PY
           echo "Committing results to branch: $TARGET_BRANCH"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # create branch if not exists
           if git rev-parse --verify "$TARGET_BRANCH" >/dev/null 2>&1; then
             git checkout "$TARGET_BRANCH"
           else
             git checkout -b "$TARGET_BRANCH"
           fi
-          # copy outputs into repo under decompiled_results/<timestamp> to avoid collisions
           TS=$(date +%Y%m%d_%H%M%S)
           DEST_DIR="decompiled_results/${TS}"
           mkdir -p "$DEST_DIR"
           cp -r ghidra_output/* "$DEST_DIR/" || true
           git add "$DEST_DIR"
           git commit -m "$COMMIT_MSG" || ( echo "Nothing to commit"; exit 0 )
-          # push using token
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
           git push origin "$TARGET_BRANCH"
           echo "Pushed commit to $TARGET_BRANCH"
@@ -226,3 +262,4 @@ PY
             ghidra_projects/**
             decompiled_results/**
             scripts/ghidra_decompile_functions.py
+

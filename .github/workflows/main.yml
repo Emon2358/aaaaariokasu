@@ -1,165 +1,53 @@
-name: Decompile release asset and commit source (ilspy → ghidra fallback)
+name: Decompile PmmaSoftware.exe using Ghidra
 
 on:
   workflow_dispatch:
-    inputs:
-      repo:
-        description: 'リリースがあるリポジトリ (owner/repo). 空欄でこのリポジトリを使う'
-        required: false
-        default: ''
-      release_tag:
-        description: 'release tag または "latest"'
-        required: false
-        default: 'latest'
-      asset_pattern:
-        description: 'ダウンロードするアセット名の正規表現（jq の test() に渡されます）。例: "\\.exe$"'
-        required: false
-        default: '\\.exe$'
-      preferred_decompiler:
-        description: '優先デコンパイラ (ilspy|ghidra). デフォルトは ilspy'
-        required: false
-        default: 'ilspy'
-
-permissions:
-  contents: write
-  id-token: write
 
 jobs:
-  fetch-and-decompile:
+  decompile:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_API: https://api.github.com
     steps:
-      - name: Checkout (for committing later)
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Install dependencies
+      - name: Download PmmaSoftware.exe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq unzip curl openjdk-17-jdk-headless python3
+          curl -L -o PmmaSoftware.exe https://github.com/Emon2358/aaaaariokasu/releases/download/aaaaropkasui/PmmaSoftware.exe
+          ls -lh PmmaSoftware.exe
 
-      - name: Fetch release asset
-        id: fetch
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_API: ${{ env.GITHUB_API }}
-          INPUT_REPO: ${{ github.event.inputs.repo }}
-          INPUT_TAG: ${{ github.event.inputs.release_tag }}
-          INPUT_PATTERN: ${{ github.event.inputs.asset_pattern }}
+      - name: Download Ghidra
         run: |
-          set -euo pipefail
-
-          REPO="${INPUT_REPO:-${GITHUB_REPOSITORY}}"
-          TAG="${INPUT_TAG:-latest}"
-          PATTERN="${INPUT_PATTERN:-\\.exe$}"
-
-          echo "Using repo: $REPO"
-          echo "Using release tag: $TAG"
-          echo "Using asset name pattern: $PATTERN"
-
-          # URL encode tag
-          ENCODED_TAG=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TAG'))")
-
-          # Build API URL
-          if [ "$TAG" = "latest" ]; then
-            API="$GITHUB_API/repos/$REPO/releases/latest"
-          else
-            API="$GITHUB_API/repos/$REPO/releases/tags/$ENCODED_TAG"
-          fi
-
-          echo "Querying GitHub API: $API"
-          RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")
-
-          if [ -z "$RESP" ] || [ "$RESP" = "null" ]; then
-            echo "Error: Release tag '$TAG' not found in repo '$REPO'"
-            exit 1
-          fi
-
-          ASSETS_EXIST=$(echo "$RESP" | jq '.assets | length')
-          if [ "$ASSETS_EXIST" -eq 0 ]; then
-            echo "Warning: Release '$TAG' has no assets. Skipping download and decompilation."
-            exit 0
-          fi
-
-          ASSET_URL=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n1)
-          ASSET_NAME=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .name' | head -n1)
-
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "Error: No matching asset found for pattern: $PATTERN"
-            echo "Available assets (name:size):"
-            echo "$RESP" | jq -r '.assets[] | "\(.name): \(.size)"'
-            exit 1
-          fi
-
-          echo "Found asset: $ASSET_NAME"
-          echo "Downloading from: $ASSET_URL"
-          curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o "./$ASSET_NAME" "$ASSET_URL"
-          ls -lh "./$ASSET_NAME"
-
-          echo "asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
-          echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
-
-      - name: Try decompile with ILSpy
-        id: ilspy
-        env:
-          ASSET_NAME: ${{ steps.fetch.outputs.asset_name }}
-        run: |
-          set -euo pipefail
-          mkdir -p recovered/ilspy
-          dotnet tool install --global ilspycmd || true
-          echo "${HOME}/.dotnet/tools" >> $GITHUB_PATH
-          if command -v ilspycmd >/dev/null 2>&1; then
-            if ilspycmd -o recovered/ilspy "${ASSET_NAME}" 2>/tmp/ilspy.err; then
-              echo "ilspy ran successfully"
-              echo "ilspy_succeeded=true" >> $GITHUB_OUTPUT
-            else
-              echo "ilspy failed (maybe native binary). see /tmp/ilspy.err"
-              echo "ilspy_succeeded=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "ilspycmd not found in PATH"
-            echo "ilspy_succeeded=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Fallback to Ghidra (native decompile)
-        if: ${{ steps.ilspy.outputs.ilspy_succeeded == 'false' }}
-        env:
-          ASSET_NAME: ${{ steps.fetch.outputs.asset_name }}
-        run: |
-          set -euo pipefail
           GHIDRA_VERSION="10.2.4"
           GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_2023sep.zip"
           GHIDRA_URL="https://ghidra-sre.org/${GHIDRA_ZIP}"
-          echo "Downloading Ghidra ${GHIDRA_ZIP} ..."
           curl -L -o "${GHIDRA_ZIP}" "$GHIDRA_URL"
           unzip -q "${GHIDRA_ZIP}"
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
-          echo "Ghidra dir: $GHIDRA_DIR"
-          mkdir -p recovered/ghidra_out
-          "${GHIDRA_DIR}/support/analyzeHeadless" ghidra_project -import "${ASSET_NAME}" -postScript ghidra_scripts/export_all_decompiled.py -deleteProject
-          echo "Ghidra headless finished. Output should be under recovered/ghidra_out/"
+          echo "Ghidra directory: $GHIDRA_DIR"
 
-      - name: Commit recovered source
+      - name: Decompile with Ghidra
+        run: |
+          mkdir -p recovered/ghidra_out
+          "${GHIDRA_DIR}/support/analyzeHeadless" ghidra_project \
+            -import PmmaSoftware.exe \
+            -postScript ghidra_scripts/export_all_decompiled.py \
+            -deleteProject
+          echo "Ghidra headless decompilation completed. Output is under recovered/ghidra_out/"
+
+      - name: Commit recovered decompiled code
         run: |
           set -euo pipefail
-          TAG="${{ github.event.inputs.release_tag }}"
-          if [ -z "$TAG" ]; then TAG="latest"; fi
-          BRANCH="recovered-source-${TAG}"
-          BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]/-/g')
+          BRANCH="recovered-source-$(date +%Y%m%d%H%M%S)"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
-          if [ -d recovered/ilspy ] && [ -n "$(ls -A recovered/ilspy 2>/dev/null || true)" ]; then
-            git add -A recovered/ilspy
-            git commit -m "Recovered managed (.NET) sources (ilspy) from release ${TAG} (asset: ${{ steps.fetch.outputs.asset_name }})" || echo "No changes to commit"
-            git push -u origin "$BRANCH"
-            echo "Pushed recovered ilspy output to branch: $BRANCH"
-          elif [ -d recovered/ghidra_out ] && [ -n "$(ls -A recovered/ghidra_out 2>/dev/null || true)" ]; then
+          
+          if [ -d recovered/ghidra_out ] && [ -n "$(ls -A recovered/ghidra_out 2>/dev/null || true)" ]; then
             git add -A recovered/ghidra_out
-            git commit -m "Recovered native decompiled output (Ghidra) from release ${TAG} (asset: ${{ steps.fetch.outputs.asset_name }})" || echo "No changes to commit"
+            git commit -m "Recovered native decompiled output (Ghidra) from PmmaSoftware.exe"
             git push -u origin "$BRANCH"
             echo "Pushed recovered ghidra output to branch: $BRANCH"
           else

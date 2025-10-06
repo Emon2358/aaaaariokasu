@@ -1,0 +1,228 @@
+name: Decompile from Release -> Commit decompiled txt
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to read from (use "latest" for latest release).'
+        required: false
+        default: 'latest'
+      asset_name:
+        description: 'Asset filename in the release (example: PmmaSoftware.exe)'
+        required: true
+      commit_branch:
+        description: 'Branch to commit decompiled files to (must be writable).'
+        required: false
+        default: 'decompiled-results'
+      commit_message:
+        description: 'Commit message for the decompiled files.'
+        required: false
+        default: 'Add decompiled_all.txt from GitHub Actions'
+      ghidra_timeout:
+        description: 'Per-function decompile timeout (seconds).'
+        required: false
+        default: '60'
+
+jobs:
+  decompile_and_commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo (for committing results)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 11 (required by Ghidra)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Install utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip curl jq git
+
+      - name: Prepare workspace
+        run: |
+          mkdir -p input ghidra_tmp ghidra_output ghidra_projects scripts
+          ls -la
+
+      - name: Ensure Ghidra script exists
+        run: |
+          # The custom Ghidra script should be committed to scripts/ghidra_decompile_functions.py
+          if [ ! -f scripts/ghidra_decompile_functions.py ]; then
+            echo "scripts/ghidra_decompile_functions.py not found - please add it to the repo."
+            exit 1
+          fi
+
+      - name: Get release JSON from GitHub API
+        id: get_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.release_tag }}"
+          OWNER_REPO="${{ github.repository }}"
+          if [ "$TAG" = "latest" ] || [ -z "$TAG" ]; then
+            API="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
+          else
+            API="https://api.github.com/repos/${OWNER_REPO}/releases/tags/${TAG}"
+          fi
+          echo "Querying $API"
+          resp=$(curl -sSL -H "Authorization: token ${GITHUB_TOKEN}" "$API")
+          echo "$resp" > /tmp/release.json
+          # extract assets list and asset id for given name
+          ASSET_NAME="${{ github.event.inputs.asset_name }}"
+          ASSET_ID=$(jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .id' /tmp/release.json)
+          ASSET_URL=$(jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .browser_download_url' /tmp/release.json)
+          if [ -z "$ASSET_ID" ] || [ "$ASSET_ID" = "null" ]; then
+            echo "Asset named '$ASSET_NAME' not found in release. Available assets:"
+            jq -r '.assets[].name' /tmp/release.json || true
+            exit 1
+          fi
+          echo "asset_id=$ASSET_ID" >> $GITHUB_OUTPUT
+          echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
+
+      - name: Download asset (release asset)
+        id: download_asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET_ID="${{ steps.get_release.outputs.asset_id }}"
+          OWNER_REPO="${{ github.repository }}"
+          OUT=input/target_binary
+          echo "Downloading asset id $ASSET_ID..."
+          # Use the asset API to download (binary)
+          curl -L \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/Emon2358/releases/assets/${ASSET_ID}" \
+            -o "$OUT"
+          echo "Saved to $OUT"
+          file "$OUT" || true
+
+      - name: Fetch latest Ghidra release URL
+        id: ghidra_fetch
+        run: |
+          API_URL="https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/latest"
+          json=$(curl -s "$API_URL")
+          asset_url=$(python3 - <<'PY'
+import sys, json
+js=json.load(sys.stdin)
+assets = js.get("assets", [])
+for a in assets:
+    name=(a.get("name") or "").lower()
+    if "public" in name and name.endswith(".zip"):
+        print(a.get("browser_download_url")); sys.exit(0)
+for a in assets:
+    name=(a.get("name") or "").lower()
+    if name.endswith(".zip"):
+        print(a.get("browser_download_url")); sys.exit(0)
+for a in assets:
+    name=(a.get("name") or "").lower()
+    if name.endswith(".tgz") or name.endswith(".tar.gz"):
+        print(a.get("browser_download_url")); sys.exit(0)
+print(js.get("zipball_url") or js.get("tarball_url") or "")
+PY
+)
+          if [ -z "$asset_url" ]; then
+            echo "Failed to locate Ghidra download asset via GitHub API"
+            exit 1
+          fi
+          echo "asset_url=$asset_url" >> $GITHUB_OUTPUT
+
+      - name: Download and extract Ghidra
+        run: |
+          ASSET="${{ steps.ghidra_fetch.outputs.asset_url }}"
+          echo "Downloading Ghidra from $ASSET"
+          curl -L -o ghidra_archive "$ASSET"
+          if unzip -v ghidra_archive >/dev/null 2>&1; then
+            unzip -q ghidra_archive -d ghidra_tmp
+          else
+            tar xf ghidra_archive -C ghidra_tmp
+          fi
+          # find extracted directory
+          GHIDRA_DIR=$(find ghidra_tmp -maxdepth 3 -type d -name "ghidra_*" -print -quit || true)
+          if [ -z "$GHIDRA_DIR" ]; then
+            GHIDRA_DIR=$(find ghidra_tmp -type f -name "analyzeHeadless" -printf '%h\n' -quit || true)
+          fi
+          if [ -z "$GHIDRA_DIR" ]; then
+            echo "Could not detect extracted Ghidra folder. Listing ghidra_tmp:"
+            ls -la ghidra_tmp
+            exit 1
+          fi
+          echo "Ghidra dir: $GHIDRA_DIR"
+          echo "$GHIDRA_DIR" > ghidra_dir_path.txt
+
+      - name: Run Ghidra headless decompilation
+        env:
+          GHIDRA_TIMEOUT: ${{ github.event.inputs.ghidra_timeout }}
+        run: |
+          GHIDRA_DIR=$(cat ghidra_dir_path.txt)
+          if [ -f "$GHIDRA_DIR/support/analyzeHeadless" ]; then
+            ANALYZE="$GHIDRA_DIR/support/analyzeHeadless"
+          elif [ -f "$GHIDRA_DIR/support/analyzeHeadless.bat" ]; then
+            ANALYZE="$GHIDRA_DIR/support/analyzeHeadless.bat"
+          else
+            ANALYZE=$(find "$GHIDRA_DIR" -type f -name "analyzeHeadless*" -print -quit)
+          fi
+          if [ -z "$ANALYZE" ]; then
+            echo "analyzeHeadless not found"
+            exit 1
+          fi
+          echo "Using analyzeHeadless: $ANALYZE"
+          PROJECT_DIR="$PWD/ghidra_projects"
+          mkdir -p "$PROJECT_DIR"
+          OUTDIR="$PWD/ghidra_output"
+          mkdir -p "$OUTDIR"
+          PROJ="proj_$(date +%Y%m%d_%H%M%S)"
+          chmod +x "$ANALYZE" || true
+          echo "Starting Ghidra headless... This may take several minutes."
+          "$ANALYZE" "$PROJECT_DIR" "$PROJ" -import input/target_binary -postScript scripts/ghidra_decompile_functions.py "OUTDIR=$OUTDIR" || ( echo "Ghidra returned non-zero exit code"; exit 1 )
+          echo "Ghidra finished. Output listing:"
+          ls -la "$OUTDIR"
+
+      - name: Show decompiled preview
+        run: |
+          echo "----- head of decompiled_all.txt -----"
+          head -n 200 ghidra_output/decompiled_all.txt || true
+          echo "-------------------------------------"
+
+      - name: Commit decompiled files back to repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_BRANCH="${{ github.event.inputs.commit_branch }}"
+          COMMIT_MSG="${{ github.event.inputs.commit_message }}"
+          echo "Committing results to branch: $TARGET_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # create branch if not exists
+          if git rev-parse --verify "$TARGET_BRANCH" >/dev/null 2>&1; then
+            git checkout "$TARGET_BRANCH"
+          else
+            git checkout -b "$TARGET_BRANCH"
+          fi
+          # copy outputs into repo under decompiled_results/<timestamp> to avoid collisions
+          TS=$(date +%Y%m%d_%H%M%S)
+          DEST_DIR="decompiled_results/${TS}"
+          mkdir -p "$DEST_DIR"
+          cp -r ghidra_output/* "$DEST_DIR/" || true
+          git add "$DEST_DIR"
+          git commit -m "$COMMIT_MSG" || ( echo "Nothing to commit"; exit 0 )
+          # push using token
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git"
+          git push origin "$TARGET_BRANCH"
+          echo "Pushed commit to $TARGET_BRANCH"
+
+      - name: Upload decompile artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghidra-decompile-output
+          path: |
+            ghidra_output/**
+            ghidra_projects/**
+            decompiled_results/**
+            scripts/ghidra_decompile_functions.py

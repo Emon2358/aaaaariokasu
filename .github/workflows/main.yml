@@ -1,71 +1,37 @@
-name: Decompile native exe with Ghidra (headless)
+name: Decompile EXE and Upload
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-
-permissions:
-  contents: write
 
 jobs:
   decompile:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    env:
+      DECOMPILATION_ALLOWED: true
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # --- 空ファイルだけでOK（内容不要）
-    - name: Safety check: DECOMPILATION_ALLOWED exists
-      run: |
-        if [ ! -f DECOMPILATION_ALLOWED ]; then
-          echo "Missing DECOMPILATION_ALLOWED file. Create an empty one in repo root to proceed."
-          exit 1
-        fi
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y wget unzip python3 python3-pip
+          pip install uncompyle6
 
-    - name: Prepare workspace
-      run: mkdir -p workspace && cd workspace
+      - name: Download EXE
+        run: |
+          wget -O PmmaSoftware.exe "https://github.com/Emon2358/aaaaariokasu/releases/download/aaaaropkasui/PmmaSoftware.exe"
 
-    - name: Download target exe
-      working-directory: workspace
-      run: |
-        echo "Downloading target EXE..."
-        curl -L --fail --retry 3 -o target.exe "https://github.com/Emon2358/aaaaariokasu/releases/download/aaaaropkasui/PmmaSoftware.exe"
-        file target.exe
+      - name: Decompile EXE
+        if: env.DECOMPILATION_ALLOWED == 'true'
+        run: |
+          mkdir -p decompiled
+          unzip -o PmmaSoftware.exe -d decompiled || echo "Couldn't unzip, trying strings"
+          strings PmmaSoftware.exe > decompiled/raw_strings.txt
 
-    - name: Download Ghidra
-      working-directory: workspace
-      run: |
-        echo "Downloading official Ghidra release..."
-        curl -L --fail --retry 3 -o ghidra.zip "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.2.1_build/ghidra_11.2.1_PUBLIC_20241001.zip"
-        unzip -q ghidra.zip -d ghidra
-
-    - name: Install Java
-      run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
-
-    - name: Clone headless scripts
-      working-directory: workspace
-      run: git clone --depth 1 https://github.com/galoget/ghidra-headless-scripts.git ghidra-scripts
-
-    - name: Run Ghidra Headless Decompile
-      working-directory: workspace
-      run: |
-        GHIDRA_DIR=$(find ghidra -maxdepth 1 -type d -name "ghidra_*" -print -quit)
-        mkdir -p project
-        chmod +x "$GHIDRA_DIR/support/analyzeHeadless"
-        "$GHIDRA_DIR/support/analyzeHeadless" "$(pwd)/project" "AutoDecompile" \
-          -import target.exe \
-          -scriptPath ghidra-scripts \
-          -postScript decompile_simple.py || true
-
-        mkdir -p $GITHUB_WORKSPACE/decompiled
-        find . -maxdepth 1 -type f -name "*.c" -exec mv {} $GITHUB_WORKSPACE/decompiled/ \;
-        ls -la $GITHUB_WORKSPACE/decompiled || true
-
-    - name: Commit results
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: "add: auto decompiled output"
-        file_pattern: "decompiled/**"
+      - name: Upload Decompiled Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiled-files
+          path: decompiled/

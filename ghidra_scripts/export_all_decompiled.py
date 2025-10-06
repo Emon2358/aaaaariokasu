@@ -30,3 +30,4 @@ for f in funcs:
         print("Failed decomp for {}: {}".format(f.getName(), e))
 
 print("Ghidra export script finished.")
+

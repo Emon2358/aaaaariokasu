@@ -39,7 +39,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq unzip curl openjdk-17-jdk-headless
+          sudo apt-get install -y jq unzip curl openjdk-17-jdk-headless python3
 
       - name: Fetch release asset
         id: fetch
@@ -52,48 +52,43 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Determine repo (fallback to current repo if input empty)
-          REPO="$INPUT_REPO"
-          if [ -z "$REPO" ]; then
-            REPO="${{ github.repository }}"
-          fi
+          REPO="${INPUT_REPO:-${GITHUB_REPOSITORY}}"
+          TAG="${INPUT_TAG:-latest}"
+          PATTERN="${INPUT_PATTERN:-\\.exe$}"
+
           echo "Using repo: $REPO"
-
-          # Determine tag (fallback to 'latest' if empty)
-          TAG="$INPUT_TAG"
-          if [ -z "$TAG" ]; then
-            TAG="latest"
-          fi
           echo "Using release tag: $TAG"
-
-          # Pattern (fallback)
-          PATTERN="$INPUT_PATTERN"
-          if [ -z "$PATTERN" ]; then
-            PATTERN='\.exe$'
-          fi
           echo "Using asset name pattern: $PATTERN"
 
-          # Build API URL correctly depending on tag
+          # URL encode tag
+          ENCODED_TAG=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$TAG'))")
+
+          # Build API URL
           if [ "$TAG" = "latest" ]; then
             API="$GITHUB_API/repos/$REPO/releases/latest"
           else
-            API="$GITHUB_API/repos/$REPO/releases/tags/$TAG"
+            API="$GITHUB_API/repos/$REPO/releases/tags/$ENCODED_TAG"
           fi
-          echo "Querying GitHub API: $API"
 
-          # Fetch release JSON
+          echo "Querying GitHub API: $API"
           RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")
-          if [ -z "$RESP" ]; then
-            echo "Empty response from GitHub API"
+
+          if [ -z "$RESP" ] || [ "$RESP" = "null" ]; then
+            echo "Error: Release tag '$TAG' not found in repo '$REPO'"
             exit 1
           fi
 
-          # Pick asset by pattern
+          ASSETS_EXIST=$(echo "$RESP" | jq '.assets | length')
+          if [ "$ASSETS_EXIST" -eq 0 ]; then
+            echo "Warning: Release '$TAG' has no assets. Skipping download and decompilation."
+            exit 0
+          fi
+
           ASSET_URL=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n1)
           ASSET_NAME=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .name' | head -n1)
 
           if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "No matching asset found for pattern: $PATTERN"
+            echo "Error: No matching asset found for pattern: $PATTERN"
             echo "Available assets (name:size):"
             echo "$RESP" | jq -r '.assets[] | "\(.name): \(.size)"'
             exit 1
@@ -104,7 +99,6 @@ jobs:
           curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o "./$ASSET_NAME" "$ASSET_URL"
           ls -lh "./$ASSET_NAME"
 
-          # export for next steps
           echo "asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
           echo "asset_url=$ASSET_URL" >> $GITHUB_OUTPUT
 
@@ -115,11 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p recovered/ilspy
-          # install dotnet and ilspycmd if not already (actions/setup-dotnet could be used earlier)
-          dotnet --version >/dev/null 2>&1 || { echo "dotnet not installed; installing via actions/setup-dotnet would be better"; }
           dotnet tool install --global ilspycmd || true
           echo "${HOME}/.dotnet/tools" >> $GITHUB_PATH
-          # attempt decompile, but don't fail the job if ilspy can't handle it
           if command -v ilspycmd >/dev/null 2>&1; then
             if ilspycmd -o recovered/ilspy "${ASSET_NAME}" 2>/tmp/ilspy.err; then
               echo "ilspy ran successfully"
@@ -148,7 +139,6 @@ jobs:
           GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
           echo "Ghidra dir: $GHIDRA_DIR"
           mkdir -p recovered/ghidra_out
-          # run analyzeHeadless using external script file ghidra_scripts/export_all_decompiled.py
           "${GHIDRA_DIR}/support/analyzeHeadless" ghidra_project -import "${ASSET_NAME}" -postScript ghidra_scripts/export_all_decompiled.py -deleteProject
           echo "Ghidra headless finished. Output should be under recovered/ghidra_out/"
 
@@ -174,5 +164,3 @@ jobs:
             echo "Pushed recovered ghidra output to branch: $BRANCH"
           else
             echo "No recovered files to commit; skipping."
-          fi
-

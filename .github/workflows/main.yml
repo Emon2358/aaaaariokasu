@@ -1,4 +1,4 @@
-name: Decompile release asset and commit source
+name: Decompile release asset and commit source (ilspy → ghidra fallback)
 
 on:
   workflow_dispatch:
@@ -15,8 +15,8 @@ on:
         description: 'ダウンロードするアセット名の正規表現（jq の test() に渡されます）。例: "\\.exe$"'
         required: false
         default: '\\.exe$'
-      decompiler:
-        description: '使用する逆コンパイラ (ilspy|retdec). デフォルトは ilspy'
+      preferred_decompiler:
+        description: '優先デコンパイラ (ilspy|ghidra). デフォルトは ilspy'
         required: false
         default: 'ilspy'
 
@@ -26,129 +26,77 @@ permissions:
 
 jobs:
   fetch-and-decompile:
-    name: Download release asset → Decompile → Commit
     runs-on: ubuntu-latest
-    env:
-      GITHUB_API: https://api.github.com
     steps:
-      - name: Prepare variables
-        id: vars
-        run: |
-          # 使用リポジトリ（入力が空なら現在のリポジトリを使う）
-          if [ -z "${{ github.event.inputs.repo }}" ]; then
-            REPO="${{ github.repository }}"
-          else
-            REPO="${{ github.event.inputs.repo }}"
-          fi
-          echo "repo=$REPO" >> $GITHUB_OUTPUT
-          TAG="${{ github.event.inputs.release_tag }}"
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          PATTERN="${{ github.event.inputs.asset_pattern }}"
-          echo "pattern=$PATTERN" >> $GITHUB_OUTPUT
-          DEC="${{ github.event.inputs.decompiler }}"
-          echo "decompiler=$DEC" >> $GITHUB_OUTPUT
-
       - name: Checkout (for committing later)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Install dependencies (jq, unzip, curl)
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq unzip curl
+          sudo apt-get install -y jq unzip curl openjdk-17-jdk-headless
 
-      - name: Find & download release asset
-        id: download
+      - name: Fetch release asset
+        id: fetch
         env:
-          REPO: ${{ steps.vars.outputs.repo }}
-          TAG: ${{ steps.vars.outputs.tag }}
-          PATTERN: ${{ steps.vars.outputs.pattern }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_API: ${{ env.GITHUB_API }}
         run: |
-          set -euo pipefail
-          echo "Repo: $REPO"
-          if [ "$TAG" = "latest" ]; then
-            API="$GITHUB_API/repos/$REPO/releases/latest"
-          else
-            API="$GITHUB_API/repos/$REPO/releases/tags/$TAG"
-          fi
-          echo "Querying: $API"
-          resp=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" "$API")
-          ASSET_URL=$(echo "$resp" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n1)
-          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
-            echo "No matching asset found for pattern: $PATTERN"
-            echo "Full release JSON (truncated):"
-            echo "$resp" | jq '. | {tag_name: .tag_name, assets: [.assets[] | {name: .name, size: .size}] }'
+          REPO="${{ github.event.inputs.repo || github.repository }}"
+          TAG="${{ github.event.inputs.release_tag || 'latest' }}"
+          PATTERN="${{ github.event.inputs.asset_pattern || '\\.exe$' }}"
+          API="https://api.github.com/repos/$REPO/releases/${TAG == 'latest' && 'latest' || ('tags/' + TAG)}"
+
+          echo "Fetching release from $API"
+          RESP=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" "$API")
+
+          ASSET_URL=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .browser_download_url' | head -n1)
+          ASSET_NAME=$(echo "$RESP" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .name' | head -n1)
+          if [ -z "$ASSET_URL" ]; then
+            echo "Asset not found!"
             exit 1
           fi
-          ASSET_NAME=$(echo "$resp" | jq -r --arg pat "$PATTERN" '.assets[] | select(.name | test($pat)) | .name' | head -n1)
-          echo "Found asset: $ASSET_NAME"
-          echo "ASSET_URL=$ASSET_URL" >> $GITHUB_OUTPUT
-          echo "ASSET_NAME=$ASSET_NAME" >> $GITHUB_OUTPUT
+          echo "Downloading $ASSET_NAME ..."
+          curl -L -o "$ASSET_NAME" -H "Authorization: Bearer $GITHUB_TOKEN" "$ASSET_URL"
+          echo "asset_name=$ASSET_NAME" >> $GITHUB_OUTPUT
 
-          # download (use token in case repo is private)
-          echo "Downloading asset..."
-          curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o "./$ASSET_NAME" "$ASSET_URL"
-          ls -lh "./$ASSET_NAME"
-
-      - name: "Setup dotnet (for ilspy)"
-        if: ${{ steps.vars.outputs.decompiler == 'ilspy' }}
-        uses: actions/setup-dotnet@v3
-        with:
-          dotnet-version: '7.x'
-
-      - name: "Install ilspycmd (global tool)"
-        if: ${{ steps.vars.outputs.decompiler == 'ilspy' }}
+      - name: Try decompile with ILSpy
+        id: ilspy
         run: |
           set -euo pipefail
           dotnet tool install --global ilspycmd || true
-          echo "${HOME}/.dotnet/tools" >> $GITHUB_PATH
-          # verify
-          which ilspycmd || echo "ilspycmd not found in PATH yet; PATH was updated for subsequent steps"
+          echo "$HOME/.dotnet/tools" >> $GITHUB_PATH
+          mkdir -p recovered/ilspy
+          if ilspycmd -o recovered/ilspy "${{ steps.fetch.outputs.asset_name }}" 2>/dev/null; then
+            echo "succeeded=true" >> $GITHUB_OUTPUT
+          else
+            echo "succeeded=false" >> $GITHUB_OUTPUT
+          fi
 
-      - name: "Decompile with ilspycmd (for .NET exe/dll)"
-        if: ${{ steps.vars.outputs.decompiler == 'ilspy' }}
-        env:
-          ASSET_NAME: ${{ steps.download.outputs.ASSET_NAME }}
+      - name: Fallback to Ghidra (native decompile)
+        if: ${{ steps.ilspy.outputs.succeeded == 'false' }}
         run: |
           set -euo pipefail
-          mkdir -p recovered
-          # ilspycmd が PATH に入っていれば直接呼べる。フルパスでも可: ${HOME}/.dotnet/tools/ilspycmd
-          if command -v ilspycmd >/dev/null 2>&1; then
-            ilspycmd -o recovered "${ASSET_NAME}"
-          else
-            echo "ilspycmd not found; trying dotnet tool path"
-            "${HOME}/.dotnet/tools/ilspycmd" -o recovered "${ASSET_NAME}"
-          fi
-          echo "Decompilation completed. Files in recovered/"
-
-      - name: "RetDec placeholder (native decompiler)"
-        if: ${{ steps.vars.outputs.decompiler == 'retdec' }}
-        run: |
-          echo "RetDec placeholder step. You should replace this with actual RetDec/Ghidra commands."
-          echo "Example (user-provided): docker run --rm -v \"$PWD\":/work avast/retdec retdec-decompiler.py --input /work/${{ steps.download.outputs.ASSET_NAME }} --output-file /work/recovered/decompiled.c"
+          GHIDRA_ZIP="ghidra_10.2.4_PUBLIC_2023sep.zip"
+          curl -L -O "https://ghidra-sre.org/${GHIDRA_ZIP}"
+          unzip -q "$GHIDRA_ZIP"
+          GHIDRA_DIR=$(ls -d ghidra_* | head -n1)
+          mkdir -p recovered/ghidra_out
+          "${GHIDRA_DIR}/support/analyzeHeadless" ghidra_project -import "${{ steps.fetch.outputs.asset_name }}" \
+            -postScript ghidra_scripts/export_all_decompiled.py -deleteProject
 
       - name: Commit recovered source
         run: |
-          set -euo pipefail
-          TAG="${{ steps.vars.outputs.tag }}"
-          BRANCH="recovered-source-${TAG}"
-          # sanitize branch name
-          BRANCH=$(echo "$BRANCH" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9._-]/-/g')
+          BRANCH="recovered-${{ github.event.inputs.release_tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -d recovered ] && [ -n "$(ls -A recovered 2>/dev/null || true)" ]; then
-            git checkout -B "$BRANCH"
-            git add -A recovered
-            git commit -m "Recovered source from release '${TAG}' (asset: ${{ steps.download.outputs.ASSET_NAME }})" || echo "No changes to commit"
-            git push -u origin "$BRANCH"
-            echo "Pushed recovered source to branch: $BRANCH"
-          else
-            echo "No recovered files found. Skipping commit."
+          git checkout -B "$BRANCH"
+          if [ -d recovered/ilspy ] && [ -n "$(ls -A recovered/ilspy)" ]; then
+            git add recovered/ilspy
+          elif [ -d recovered/ghidra_out ]; then
+            git add recovered/ghidra_out
           fi
-
-
-
+          git commit -m "Recovered source from release ${{ github.event.inputs.release_tag }}"
+          git push -u origin "$BRANCH"

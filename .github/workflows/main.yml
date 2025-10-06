@@ -18,11 +18,11 @@ jobs:
           curl -L -o PmmaSoftware.exe https://github.com/Emon2358/aaaaariokasu/releases/download/aaaaropkasui/PmmaSoftware.exe
           ls -lh PmmaSoftware.exe
 
-      - name: Download Ghidra
+      - name: Download Ghidra 11.4.2
         run: |
-          GHIDRA_VERSION="10.2.4"
-          GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_2023feb.zip"
-          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/Ghidra_${GHIDRA_VERSION}_PUBLIC_2023feb.zip"
+          GHIDRA_VERSION="11.4.2"
+          GHIDRA_ZIP="ghidra_${GHIDRA_VERSION}_PUBLIC_20250826.zip"
+          GHIDRA_URL="https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_20250826.zip"
           
           echo "Downloading Ghidra from $GHIDRA_URL ..."
           curl -L -o "${GHIDRA_ZIP}" "$GHIDRA_URL"

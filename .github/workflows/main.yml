@@ -62,26 +62,27 @@ jobs:
         id: parse_release
         run: |
           URL="${{ github.event.inputs.release_url }}"
-          python3 - <<'PY' > /tmp/parsed.txt
+          # Run python and pass URL as argv[1]
+          python3 - "$URL" > /tmp/parsed.txt <<'PY'
 import sys, re, urllib.parse
 url = sys.argv[1]
 p = urllib.parse.urlparse(url)
 path = p.path
-# path expected: /owner/repo/releases/tag/TAG
+# expected: /owner/repo/releases/tag/TAG  (also support /releases/latest)
 m = re.match(r'^/([^/]+)/([^/]+)/releases/(?:tag|download)/(.+)$', path)
 if m:
     owner, repo, tag = m.group(1), m.group(2), m.group(3)
 else:
-    # maybe URL ends with /releases/latest
     m2 = re.match(r'^/([^/]+)/([^/]+)/releases/?(latest)?$', path)
     if m2:
         owner, repo, tag = m2.group(1), m2.group(2), 'latest'
     else:
-        print("ERROR: couldn't parse release URL", url)
+        print("ERROR: couldn't parse release URL", url, file=sys.stderr)
         sys.exit(2)
-print(owner + "/" + repo + "\n" + tag)
+# print owner/repo and tag on separate lines
+print(owner + "/" + repo)
+print(tag)
 PY
- "${URL}"
           cat /tmp/parsed.txt
           OWNER_REPO=$(sed -n '1p' /tmp/parsed.txt)
           TAG=$(sed -n '2p' /tmp/parsed.txt)
@@ -99,7 +100,6 @@ PY
           if [ "$TAG" = "latest" ]; then
             API="https://api.github.com/repos/${OWNER_REPO}/releases/latest"
           else
-            # tag may contain url-encoded parts; encode
             TAG_ENC=$(python3 - <<'PY'
 import sys, urllib.parse
 print(urllib.parse.quote(sys.argv[1], safe=''))
@@ -109,10 +109,6 @@ PY
           fi
           echo "Querying $API"
           resp=$(curl -sSL -H "Authorization: token ${GITHUB_TOKEN}" "$API")
-          if [ -z "$resp" ]; then
-            echo "Empty response from GitHub API"
-            exit 1
-          fi
           echo "$resp" > /tmp/release.json
           ASSET_NAME="${{ github.event.inputs.asset_name }}"
           ASSET_ID=$(jq -r --arg name "$ASSET_NAME" '.assets[] | select(.name == $name) | .id' /tmp/release.json)
@@ -262,4 +258,5 @@ PY
             ghidra_projects/**
             decompiled_results/**
             scripts/ghidra_decompile_functions.py
+
 
